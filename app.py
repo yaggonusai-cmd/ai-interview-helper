@@ -1,401 +1,836 @@
 import os
+import io
 import json
+import time
+import wave
+import queue
 import random
+import threading
+
+import av
+import numpy as np
 import streamlit as st
+import streamlit.components.v1 as components
+
 from openai import OpenAI
+from streamlit_webrtc import WebRtcMode, webrtc_streamer
+
+
+# ============================================================
+# PAGE SETTINGS
+# ============================================================
 
 st.set_page_config(
-    page_title="AI Interview Helper",
+    page_title="Madpirate AI Interview Helper",
     page_icon="🎯",
     layout="wide"
 )
 
-# -------------------------------------------------
+st.title("🎯 AI Interview Helper")
+
+st.caption(
+    "Hands-free AI mock interview practice for technical "
+    "and non-technical interview questions."
+)
+
+
+# ============================================================
 # SESSION STATE
-# -------------------------------------------------
+# ============================================================
 
-if "question" not in st.session_state:
-    st.session_state.question = ""
-
-if "evaluation" not in st.session_state:
-    st.session_state.evaluation = None
-
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-# -------------------------------------------------
-# TEST QUESTIONS
-# -------------------------------------------------
-
-TEST_QUESTIONS = {
-    "Python Developer": [
-        "What is the difference between a Python list and a tuple?",
-        "Explain the difference between == and is in Python.",
-        "What is a Python decorator and when would you use one?",
-        "Explain exception handling in Python.",
-        "What is the difference between shallow copy and deep copy?"
-    ],
-
-    "Software Developer": [
-        "What is object-oriented programming?",
-        "Explain the difference between a process and a thread.",
-        "What is an API and how is it used?",
-        "What is version control and why is Git useful?",
-        "Explain the difference between frontend and backend development."
-    ],
-
-    "Data Analyst": [
-        "What is the difference between INNER JOIN and LEFT JOIN in SQL?",
-        "How would you handle missing values in a dataset?",
-        "What is data normalization?",
-        "Explain the difference between WHERE and HAVING in SQL.",
-        "How would you identify duplicate records in SQL?"
-    ],
-
-    "ServiceNow Developer": [
-        "What is the difference between a Client Script and a Business Rule?",
-        "What is a Script Include in ServiceNow?",
-        "What is GlideRecord?",
-        "What is the difference between UI Policy and Data Policy?",
-        "Explain how ACLs work in ServiceNow."
-    ],
-
-    "DevOps Engineer": [
-        "What is CI/CD?",
-        "What is Docker and why is it used?",
-        "What is the difference between Git merge and Git rebase?",
-        "What is Infrastructure as Code?",
-        "What is Kubernetes used for?"
-    ],
-
-    "Cloud Engineer": [
-        "What is cloud computing?",
-        "What is the difference between IaaS, PaaS, and SaaS?",
-        "What is auto scaling?",
-        "What is a load balancer?",
-        "What is the difference between public and private cloud?"
-    ]
+defaults = {
+    "running": False,
+    "question": "",
+    "question_number": 0,
+    "last_spoken_question": "",
+    "transcript": "",
+    "evaluation": None,
+    "history": [],
+    "status": "Ready",
+    "next_question_time": 0,
+    "last_audio_id": ""
 }
 
-DEFAULT_QUESTIONS = [
-    "Tell me about yourself from a technical perspective.",
-    "Describe a technical problem you solved.",
-    "How do you approach debugging an application?",
-    "What steps do you follow when learning a new technology?",
-    "How do you make sure your code is reliable?"
-]
+for key, value in defaults.items():
 
-# -------------------------------------------------
-# TEST MODE HUMANIZED ANSWERS
-# -------------------------------------------------
+    if key not in st.session_state:
+        st.session_state[key] = value
 
-TEST_ANSWERS = {
 
-    "What is the difference between a Python list and a tuple?": {
-        "better_answer":
-            "The main difference is that a list is mutable, which means I can "
-            "add, remove, or change items after creating it. A tuple is immutable, "
-            "so once it is created, its values cannot be changed. In practice, I "
-            "would use a list when the data may change during the program, such as "
-            "items in a shopping cart. I would use a tuple for values that should "
-            "stay fixed, such as coordinates. Lists use square brackets, while "
-            "tuples normally use parentheses.",
-
-        "short_answer":
-            "The main difference is mutability. Lists can be modified after "
-            "creation, while tuples cannot. I normally use a list for data that "
-            "changes and a tuple for fixed values. For example, shopping cart "
-            "items could be stored in a list, while coordinates could be stored "
-            "in a tuple."
-    },
-
-    "What is the difference between a Client Script and a Business Rule?": {
-        "better_answer":
-            "The main difference is where they execute. A Client Script runs in "
-            "the user's browser and is mainly used to control form behavior, such "
-            "as making a field mandatory or showing a message. A Business Rule "
-            "runs on the server and is used when records are inserted, updated, "
-            "deleted, or queried. For example, if I want to automatically update "
-            "a field before saving a record, I would normally use a Business Rule. "
-            "If I want to change how the form behaves while the user is filling it "
-            "out, I would use a Client Script.",
-
-        "short_answer":
-            "A Client Script runs on the client side and controls form behavior. "
-            "A Business Rule runs on the server side and handles record processing. "
-            "For example, I would use a Client Script to make a field mandatory "
-            "and a Business Rule to update a value when a record is saved."
-    },
-
-    "What is the difference between INNER JOIN and LEFT JOIN in SQL?": {
-        "better_answer":
-            "An INNER JOIN returns only the rows that have matching values in both "
-            "tables. A LEFT JOIN returns all rows from the left table and the "
-            "matching rows from the right table. If there is no match, the right "
-            "side contains NULL values. In practice, I use INNER JOIN when I only "
-            "need records that exist in both tables. I use LEFT JOIN when I still "
-            "want to keep every record from the main table, even if related data "
-            "is missing.",
-
-        "short_answer":
-            "INNER JOIN returns only matching rows from both tables. LEFT JOIN "
-            "returns every row from the left table and matching rows from the "
-            "right table. If there is no match, the right-side values are NULL."
-    }
-}
-
-# -------------------------------------------------
-# OPENAI SETUP
-# -------------------------------------------------
+# ============================================================
+# OPENAI SETTINGS
+# ============================================================
 
 def get_api_key():
-    # Works locally with environment variable
-    key = os.getenv("OPENAI_API_KEY")
 
-    # Works on Streamlit Cloud with secrets
+    key = os.getenv(
+        "OPENAI_API_KEY"
+    )
+
     if not key:
+
         try:
-            key = st.secrets.get("OPENAI_API_KEY")
+
+            key = st.secrets.get(
+                "OPENAI_API_KEY",
+                None
+            )
+
         except Exception:
+
             key = None
 
     return key
 
 
 def get_model():
-    model = os.getenv("OPENAI_MODEL")
+
+    model = os.getenv(
+        "OPENAI_MODEL"
+    )
 
     if not model:
+
         try:
-            model = st.secrets.get("OPENAI_MODEL", "gpt-5.6")
+
+            model = st.secrets.get(
+                "OPENAI_MODEL",
+                "gpt-5.6"
+            )
+
         except Exception:
+
             model = "gpt-5.6"
 
     return model
 
 
-# -------------------------------------------------
-# REAL AI FUNCTIONS
-# -------------------------------------------------
-
-def ask_ai(instructions, user_input):
+def get_client():
 
     api_key = get_api_key()
 
     if not api_key:
-        raise Exception("OPENAI_API_KEY is not configured.")
 
-    client = OpenAI(api_key=api_key)
+        raise RuntimeError(
+            "OPENAI_API_KEY is not configured."
+        )
 
-    response = client.responses.create(
-        model=get_model(),
-        instructions=instructions,
-        input=user_input
+    return OpenAI(
+        api_key=api_key
     )
 
-    return response.output_text
+
+# ============================================================
+# TEST QUESTIONS
+# ============================================================
+
+TEST_QUESTIONS = {
+
+    "Python Developer": [
+
+        "What is the difference between a Python list and a tuple?",
+
+        "What are Python dictionaries?",
+
+        "Explain exception handling in Python.",
+
+        "What is a Python decorator?",
+
+        "What is the difference between == and is in Python?"
+    ],
+
+    "Software Developer": [
+
+        "What is object-oriented programming?",
+
+        "What is an API?",
+
+        "How do you debug an application?",
+
+        "What is version control?",
+
+        "Explain polymorphism."
+    ],
+
+    "Data Analyst": [
+
+        "What is the difference between INNER JOIN and LEFT JOIN?",
+
+        "How would you handle missing values?",
+
+        "What is data cleaning?",
+
+        "What is the difference between WHERE and HAVING?",
+
+        "How would you find duplicate records in SQL?"
+    ],
+
+    "ServiceNow Developer": [
+
+        "What is the difference between a Client Script and a Business Rule?",
+
+        "What is GlideRecord?",
+
+        "What is a Script Include?",
+
+        "What is an ACL in ServiceNow?",
+
+        "What is a UI Policy?"
+    ],
+
+    "DevOps Engineer": [
+
+        "What is CI CD?",
+
+        "What is Docker?",
+
+        "What is Kubernetes?",
+
+        "What is Infrastructure as Code?",
+
+        "What is Git?"
+    ],
+
+    "HR / Behavioral": [
+
+        "Tell me about yourself.",
+
+        "Why should we hire you?",
+
+        "What are your strengths?",
+
+        "What is one weakness you are improving?",
+
+        "How do you handle conflict with a coworker?"
+    ]
+}
 
 
-def generate_real_question(role, technologies, level, interview_type):
+# ============================================================
+# GENERATE QUESTION
+# ============================================================
+
+def generate_question(
+    role,
+    technologies,
+    experience,
+    interview_type,
+    test_mode
+):
+
+    if test_mode:
+
+        questions = TEST_QUESTIONS.get(
+            role,
+            TEST_QUESTIONS[
+                "Software Developer"
+            ]
+        )
+
+        return random.choice(
+            questions
+        )
+
+    client = get_client()
 
     instructions = """
-You are a professional IT/software interviewer.
+You are a professional IT/software mock interviewer.
 
-Generate exactly ONE realistic interview question.
+Generate exactly ONE interview question.
+
+The question may be technical or non-technical.
 
 Match:
-- target role
+
+- candidate role
 - technologies
 - experience level
 - interview type
 
-Do not provide the answer.
-Return only the interview question.
-"""
+Possible areas include:
 
-    user_input = f"""
-Role: {role}
-Technologies: {technologies}
-Experience: {level}
-Interview Type: {interview_type}
-"""
-
-    return ask_ai(instructions, user_input)
-
-
-def evaluate_real_answer(question, answer, role, technologies, level):
-
-    instructions = """
-You are an expert IT interview coach.
-
-Return ONLY valid JSON:
-
-{
-  "score": 0,
-  "technical_accuracy": 0,
-  "clarity": 0,
-  "completeness": 0,
-  "strengths": ["..."],
-  "improvements": ["..."],
-  "missing_points": ["..."],
-  "better_answer": "...",
-  "short_answer": "...",
-  "follow_up_question": "..."
-}
-
-The better_answer must sound natural and human.
+Python
+Java
+JavaScript
+SQL
+ServiceNow
+Cloud
+DevOps
+Networking
+Cybersecurity
+Testing
+Data Analysis
+System Design
+HR
+Behavioral
+Leadership
+Communication
 
 Rules:
-- Use simple professional English.
-- Avoid robotic or textbook language.
-- Keep answers conversational.
-- Use practical examples.
-- Do not invent experience.
-- Keep the better answer around 100 to 180 words.
-- Keep short_answer around 60 to 100 words.
+
+Ask only ONE question.
+
+Do not provide the answer.
+
+Return only the question.
 """
 
-    user_input = f"""
-Role: {role}
-Technologies: {technologies}
-Experience: {level}
+    prompt = f"""
+Role:
+{role}
 
-Question:
+Technologies:
+{technologies}
+
+Experience:
+{experience}
+
+Interview Type:
+{interview_type}
+"""
+
+    response = client.responses.create(
+
+        model=get_model(),
+
+        instructions=instructions,
+
+        input=prompt
+    )
+
+    return response.output_text.strip()
+
+
+# ============================================================
+# TRANSCRIBE VOICE
+# ============================================================
+
+def transcribe_audio(
+    wav_bytes
+):
+
+    client = get_client()
+
+    audio_file = io.BytesIO(
+        wav_bytes
+    )
+
+    audio_file.name = (
+        "interview_answer.wav"
+    )
+
+    transcription = (
+        client.audio.transcriptions.create(
+
+            model="gpt-4o-mini-transcribe",
+
+            file=audio_file
+        )
+    )
+
+    return transcription.text.strip()
+
+
+# ============================================================
+# EVALUATE ANSWER
+# ============================================================
+
+def evaluate_answer(
+    question,
+    candidate_answer,
+    role,
+    technologies,
+    experience
+):
+
+    client = get_client()
+
+    instructions = """
+You are an expert IT/software interview coach.
+
+The candidate is practicing for an interview.
+
+Evaluate the answer.
+
+Return ONLY JSON:
+
+{
+    "score": 0,
+    "technical_accuracy": 0,
+    "clarity": 0,
+    "completeness": 0,
+    "question_type": "...",
+    "humanized_answer": "...",
+    "short_answer": "...",
+    "key_points": [
+        "...",
+        "...",
+        "..."
+    ],
+    "follow_up_question": "..."
+}
+
+IMPORTANT:
+
+Scores must be from 0 to 10.
+
+Determine whether the question is:
+
+Technical
+Non-Technical
+HR
+Behavioral
+Scenario
+Coding
+System Design
+General
+
+The humanized answer must sound like
+a REAL person speaking during an interview.
+
+Use:
+
+simple English
+natural language
+short sentences
+professional wording
+practical examples
+
+Avoid:
+
+robotic language
+AI-style language
+textbook definitions
+unnecessary jargon
+
+Do not invent:
+
+companies
+projects
+employment history
+achievements
+
+If the candidate is a fresher,
+do not invent professional experience.
+
+The humanized answer should normally
+take around 60 to 90 seconds.
+
+The short answer should normally
+take around 30 to 60 seconds.
+
+If the original answer contains an
+incorrect technical statement,
+correct it.
+"""
+
+    prompt = f"""
+Target Role:
+{role}
+
+Technologies:
+{technologies}
+
+Experience:
+{experience}
+
+Interview Question:
 {question}
 
 Candidate Answer:
-{answer}
+{candidate_answer}
 """
 
-    raw = ask_ai(instructions, user_input)
+    response = client.responses.create(
 
-    cleaned = raw.strip()
+        model=get_model(),
 
-    if cleaned.startswith("```"):
-        cleaned = cleaned.replace("```json", "", 1)
-        cleaned = cleaned.replace("```", "").strip()
+        instructions=instructions,
 
-    return json.loads(cleaned)
-
-
-# -------------------------------------------------
-# TEST MODE FUNCTIONS
-# -------------------------------------------------
-
-def generate_test_question(role):
-
-    questions = TEST_QUESTIONS.get(
-        role,
-        DEFAULT_QUESTIONS
+        input=prompt
     )
 
-    return random.choice(questions)
+    result = response.output_text.strip()
 
+    if result.startswith("```"):
 
-def evaluate_test_answer(question, answer):
-
-    answer_length = len(answer.split())
-
-    if answer_length < 10:
-        score = 4
-    elif answer_length < 25:
-        score = 6
-    elif answer_length < 60:
-        score = 8
-    else:
-        score = 9
-
-    sample = TEST_ANSWERS.get(question)
-
-    if sample:
-        better_answer = sample["better_answer"]
-        short_answer = sample["short_answer"]
-
-    else:
-        better_answer = (
-            "A good way to answer this is to first explain the concept clearly, "
-            "then give one practical example. I would keep the explanation simple "
-            "and focus on how the technology is actually used. In a real interview, "
-            "I would avoid giving only a definition and instead explain when I "
-            "would use the concept and why."
+        result = (
+            result
+            .replace(
+                "```json",
+                "",
+                1
+            )
+            .replace(
+                "```",
+                ""
+            )
+            .strip()
         )
 
-        short_answer = (
-            "I would explain the main concept first and then give a practical "
-            "example. That helps show both technical understanding and how the "
-            "concept is used in a real situation."
+    return json.loads(
+        result
+    )
+
+
+# ============================================================
+# TEXT TO SPEECH
+# ============================================================
+
+def speak_question(
+    question
+):
+
+    question_json = json.dumps(
+        question
+    )
+
+    components.html(
+
+        f"""
+        <script>
+
+        window.speechSynthesis.cancel();
+
+        const message =
+            new SpeechSynthesisUtterance(
+                {question_json}
+            );
+
+        message.rate = 0.95;
+
+        message.pitch = 1;
+
+        window.speechSynthesis.speak(
+            message
+        );
+
+        </script>
+        """,
+
+        height=0
+    )
+
+
+# ============================================================
+# AUTOMATIC VOICE DETECTION
+# ============================================================
+
+class AutomaticVoiceDetector:
+
+    def __init__(self):
+
+        self.resampler = (
+            av.AudioResampler(
+
+                format="s16",
+
+                layout="mono",
+
+                rate=16000
+            )
         )
 
-    return {
-        "score": score,
-        "technical_accuracy": score,
-        "clarity": max(score - 1, 1),
-        "completeness": score,
-        "strengths": [
-            "You attempted to explain the concept.",
-            "Your answer can be improved with practical examples."
-        ],
-        "improvements": [
-            "Structure your answer more clearly.",
-            "Add one real-world example.",
-            "Focus on the most important technical points."
-        ],
-        "missing_points": [
-            "A practical use case may improve the answer."
-        ],
-        "better_answer": better_answer,
-        "short_answer": short_answer,
-        "follow_up_question":
-            "Can you give me a practical example of when you would use this?"
-    }
+        self.sample_rate = 16000
+
+        self.audio_chunks = []
+
+        self.is_speaking = False
+
+        self.silence_duration = 0
+
+        self.audio_queue = queue.Queue()
+
+        self.lock = threading.Lock()
 
 
-# -------------------------------------------------
-# UI
-# -------------------------------------------------
+        # Increase if background noise triggers detection.
+        # Reduce if microphone is quiet.
 
-st.title("🎯 AI Interview Helper")
+        self.energy_threshold = 500
 
-st.caption(
-    "Practice IT/software interviews and improve your answers."
-)
+
+        # Automatically finish the answer after
+        # approximately this much silence.
+
+        self.required_silence = 1.4
+
+
+        # Ignore extremely short sounds.
+
+        self.minimum_speech = 0.8
+
+
+    def recv(
+        self,
+        frame
+    ):
+
+        frames = (
+            self.resampler.resample(
+                frame
+            )
+        )
+
+        if not isinstance(
+            frames,
+            list
+        ):
+
+            frames = [frames]
+
+
+        for frame in frames:
+
+            if frame is None:
+
+                continue
+
+
+            samples = (
+                frame
+                .to_ndarray()
+                .reshape(-1)
+                .astype(
+                    np.int16
+                )
+            )
+
+
+            if len(samples) == 0:
+
+                continue
+
+
+            energy = float(
+
+                np.sqrt(
+
+                    np.mean(
+
+                        samples.astype(
+                            np.float32
+                        ) ** 2
+
+                    )
+
+                )
+
+            )
+
+
+            duration = (
+
+                len(samples)
+                /
+                self.sample_rate
+
+            )
+
+
+            # ------------------------------------------------
+            # SPEECH DETECTED
+            # ------------------------------------------------
+
+            if (
+                energy
+                >
+                self.energy_threshold
+            ):
+
+                self.is_speaking = True
+
+                self.silence_duration = 0
+
+                self.audio_chunks.append(
+                    samples.copy()
+                )
+
+
+            # ------------------------------------------------
+            # SILENCE
+            # ------------------------------------------------
+
+            elif self.is_speaking:
+
+                self.audio_chunks.append(
+                    samples.copy()
+                )
+
+                self.silence_duration += (
+                    duration
+                )
+
+
+                # User stopped talking
+
+                if (
+
+                    self.silence_duration
+                    >=
+                    self.required_silence
+
+                ):
+
+                    self.finish_answer()
+
+
+        return frame
+
+
+    # ========================================================
+    # CREATE WAV FILE
+    # ========================================================
+
+    def finish_answer(
+        self
+    ):
+
+        if not self.audio_chunks:
+
+            self.reset()
+
+            return
+
+
+        audio = np.concatenate(
+            self.audio_chunks
+        )
+
+
+        total_duration = (
+
+            len(audio)
+            /
+            self.sample_rate
+
+        )
+
+
+        if (
+
+            total_duration
+            >=
+            self.minimum_speech
+
+        ):
+
+            buffer = io.BytesIO()
+
+
+            with wave.open(
+                buffer,
+                "wb"
+            ) as wav:
+
+                wav.setnchannels(1)
+
+                wav.setsampwidth(2)
+
+                wav.setframerate(
+                    self.sample_rate
+                )
+
+                wav.writeframes(
+                    audio.tobytes()
+                )
+
+
+            self.audio_queue.put(
+                buffer.getvalue()
+            )
+
+
+        self.reset()
+
+
+    # ========================================================
+    # RESET
+    # ========================================================
+
+    def reset(
+        self
+    ):
+
+        self.audio_chunks = []
+
+        self.is_speaking = False
+
+        self.silence_duration = 0
+
+
+    # ========================================================
+    # GET COMPLETED ANSWER
+    # ========================================================
+
+    def get_answer_audio(
+        self
+    ):
+
+        try:
+
+            return (
+                self.audio_queue
+                .get_nowait()
+            )
+
+        except queue.Empty:
+
+            return None
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
 
 with st.sidebar:
 
-    st.header("Interview Setup")
-
-    mode = st.radio(
-        "Application Mode",
-        [
-            "🧪 Test Mode - Free",
-            "🤖 Real AI Mode"
-        ]
+    st.header(
+        "⚙️ Interview Setup"
     )
 
+
+    test_mode = st.toggle(
+        "🧪 Test Questions",
+        value=False
+    )
+
+
     role = st.selectbox(
+
         "Target Role",
+
         [
             "Python Developer",
             "Software Developer",
             "Data Analyst",
             "ServiceNow Developer",
-            "Cloud Engineer",
             "DevOps Engineer",
+            "Cloud Engineer",
             "QA / Test Engineer",
             "Frontend Developer",
             "Backend Developer",
             "Full Stack Developer",
-            "Cybersecurity Analyst"
+            "Cybersecurity Analyst",
+            "HR / Behavioral"
         ]
     )
 
+
     technologies = st.text_input(
-        "Technologies / Skills",
-        value="Python, SQL, Git"
+
+        "Technologies",
+
+        value=(
+            "Python, SQL, Git"
+        )
     )
 
-    level = st.selectbox(
+
+    experience = st.selectbox(
+
         "Experience Level",
+
         [
             "Fresher",
             "1-2 years",
@@ -405,9 +840,13 @@ with st.sidebar:
         ]
     )
 
+
     interview_type = st.selectbox(
+
         "Interview Type",
+
         [
+            "Mixed",
             "Technical",
             "Coding",
             "Scenario-based",
@@ -417,306 +856,735 @@ with st.sidebar:
         ]
     )
 
-    if mode.startswith("🧪"):
-        st.success(
-            "Test Mode is active. No API credits are used."
-        )
-    else:
-        st.warning(
-            "Real AI Mode uses your OpenAI API credits."
-        )
 
-# -------------------------------------------------
-# QUESTION
-# -------------------------------------------------
+    wait_seconds = st.slider(
 
-left, right = st.columns([1.2, 1])
+        "Seconds before next question",
 
-with left:
+        minimum_value := 5,
 
-    st.subheader("1. Interview Question")
+        maximum_value := 20,
 
-    if st.button(
-        "Generate Question",
-        type="primary",
-        use_container_width=True
-    ):
+        value=10
 
-        st.session_state.evaluation = None
+    )
 
-        if mode.startswith("🧪"):
 
-            st.session_state.question = (
-                generate_test_question(role)
-            )
+# ============================================================
+# START INTERVIEW
+# ============================================================
 
-        else:
+col1, col2 = st.columns(
+    [1, 1]
+)
 
-            try:
 
-                with st.spinner(
-                    "Generating AI interview question..."
-                ):
+with col1:
 
-                    st.session_state.question = (
-                        generate_real_question(
-                            role,
-                            technologies,
-                            level,
-                            interview_type
-                        )
-                    )
-
-            except Exception as e:
-
-                st.error(
-                    f"AI request failed: {e}"
-                )
-
-    if st.session_state.question:
-
-        st.markdown("### Question")
-
-        st.write(
-            st.session_state.question
-        )
-
-        answer = st.text_area(
-            "Your Answer",
-            height=220,
-            placeholder="Type your interview answer here..."
-        )
+    if not st.session_state.running:
 
         if st.button(
-            "Evaluate My Answer",
+
+            "▶ Start Mock Interview",
+
+            type="primary",
+
             use_container_width=True
         ):
 
-            if not answer.strip():
+            st.session_state.running = True
 
-                st.warning(
-                    "Please enter your answer first."
-                )
+            st.session_state.question = ""
 
-            else:
+            st.session_state.transcript = ""
 
-                if mode.startswith("🧪"):
+            st.session_state.evaluation = None
 
-                    result = evaluate_test_answer(
-                        st.session_state.question,
-                        answer
+            st.session_state.question_number = 0
+
+            st.session_state.status = (
+                "Starting interview..."
+            )
+
+            st.rerun()
+
+
+with col2:
+
+    if st.session_state.running:
+
+        if st.button(
+
+            "■ End Interview",
+
+            use_container_width=True
+        ):
+
+            st.session_state.running = False
+
+            st.session_state.status = (
+                "Interview ended"
+            )
+
+            st.rerun()
+
+
+st.info(
+    f"Status: {st.session_state.status}"
+)
+
+
+# ============================================================
+# RUNNING INTERVIEW
+# ============================================================
+
+if st.session_state.running:
+
+
+    # --------------------------------------------------------
+    # GENERATE QUESTION AUTOMATICALLY
+    # --------------------------------------------------------
+
+    if not st.session_state.question:
+
+        try:
+
+            with st.spinner(
+                "Preparing question..."
+            ):
+
+                question = (
+                    generate_question(
+
+                        role,
+
+                        technologies,
+
+                        experience,
+
+                        interview_type,
+
+                        test_mode
                     )
-
-                else:
-
-                    try:
-
-                        with st.spinner(
-                            "Evaluating your answer..."
-                        ):
-
-                            result = evaluate_real_answer(
-                                st.session_state.question,
-                                answer,
-                                role,
-                                technologies,
-                                level
-                            )
-
-                    except Exception as e:
-
-                        st.error(
-                            f"AI evaluation failed: {e}"
-                        )
-
-                        result = None
-
-                if result:
-
-                    st.session_state.evaluation = result
-
-                    st.session_state.history.append(
-                        {
-                            "question":
-                                st.session_state.question,
-
-                            "answer":
-                                answer,
-
-                            "evaluation":
-                                result
-                        }
-                    )
-
-# -------------------------------------------------
-# FEEDBACK
-# -------------------------------------------------
-
-with right:
-
-    st.subheader("2. Interview Feedback")
-
-    result = st.session_state.evaluation
-
-    if result:
-
-        col1, col2 = st.columns(2)
-
-        col1.metric(
-            "Overall Score",
-            f"{result.get('score', 0)}/10"
-        )
-
-        col2.metric(
-            "Technical Accuracy",
-            f"{result.get('technical_accuracy', 0)}/10"
-        )
-
-        col3, col4 = st.columns(2)
-
-        col3.metric(
-            "Clarity",
-            f"{result.get('clarity', 0)}/10"
-        )
-
-        col4.metric(
-            "Completeness",
-            f"{result.get('completeness', 0)}/10"
-        )
-
-        st.markdown("#### ✅ Strengths")
-
-        for item in result.get(
-            "strengths",
-            []
-        ):
-            st.write(
-                f"✅ {item}"
-            )
-
-        st.markdown("#### 🔧 Improvements")
-
-        for item in result.get(
-            "improvements",
-            []
-        ):
-            st.write(
-                f"🔧 {item}"
-            )
-
-        st.markdown("#### 📌 Missing Points")
-
-        for item in result.get(
-            "missing_points",
-            []
-        ):
-            st.write(
-                f"• {item}"
-            )
-
-        with st.expander(
-            "🧑 Humanized Interview Answer"
-        ):
-
-            st.write(
-                result.get(
-                    "better_answer",
-                    ""
                 )
-            )
 
-        with st.expander(
-            "⚡ 30–60 Second Answer"
-        ):
 
-            st.write(
-                result.get(
-                    "short_answer",
-                    ""
+                st.session_state.question = (
+                    question
                 )
+
+                st.session_state.question_number += 1
+
+                st.session_state.transcript = ""
+
+                st.session_state.evaluation = None
+
+                st.session_state.status = (
+                    "Listening..."
+                )
+
+
+        except Exception as error:
+
+            st.error(
+                error
             )
 
-        st.markdown(
-            "#### 🎯 Follow-up Question"
+            st.stop()
+
+
+    # --------------------------------------------------------
+    # AUTOMATICALLY READ QUESTION ALOUD
+    # --------------------------------------------------------
+
+    if (
+
+        st.session_state.question
+        !=
+        st.session_state.last_spoken_question
+
+    ):
+
+        speak_question(
+            st.session_state.question
         )
 
-        st.write(
-            result.get(
-                "follow_up_question",
-                ""
-            )
+        st.session_state.last_spoken_question = (
+            st.session_state.question
         )
 
-    else:
+
+    left, right = st.columns(
+        [1.1, 1]
+    )
+
+
+    # ========================================================
+    # LEFT
+    # ========================================================
+
+    with left:
+
+        st.subheader(
+            f"🎤 Question {st.session_state.question_number}"
+        )
+
 
         st.info(
-            "Generate a question and evaluate "
-            "your answer to see feedback."
+            st.session_state.question
         )
 
-# -------------------------------------------------
+
+        st.markdown(
+            "### 🎙️ Automatic Microphone"
+        )
+
+
+        st.caption(
+            "Speak naturally. The app detects when you start "
+            "and stops processing after you become silent."
+        )
+
+
+        webrtc_context = webrtc_streamer(
+
+            key="automatic-interview-microphone",
+
+            mode=WebRtcMode.SENDONLY,
+
+
+            # Automatically keep microphone running
+
+            desired_playing_state=True,
+
+
+            media_stream_constraints={
+
+                "video": False,
+
+                "audio": True
+
+            },
+
+
+            # Hide microphone media toggle buttons
+
+            media_toggle_controls=False,
+
+
+            audio_processor_factory=(
+                AutomaticVoiceDetector
+            ),
+
+
+            async_processing=True
+        )
+
+
+        if st.session_state.transcript:
+
+            st.markdown(
+                "### 📝 Detected Answer"
+            )
+
+            st.write(
+                st.session_state.transcript
+            )
+
+
+    # ========================================================
+    # RIGHT
+    # ========================================================
+
+    with right:
+
+        st.subheader(
+            "🧠 AI Interview Answer"
+        )
+
+
+        result = (
+            st.session_state.evaluation
+        )
+
+
+        if result:
+
+
+            a, b = st.columns(2)
+
+
+            a.metric(
+
+                "Overall Score",
+
+                f"{result.get('score', 0)}/10"
+            )
+
+
+            b.metric(
+
+                "Technical Accuracy",
+
+                f"{result.get('technical_accuracy', 0)}/10"
+            )
+
+
+            c, d = st.columns(2)
+
+
+            c.metric(
+
+                "Clarity",
+
+                f"{result.get('clarity', 0)}/10"
+            )
+
+
+            d.metric(
+
+                "Completeness",
+
+                f"{result.get('completeness', 0)}/10"
+            )
+
+
+            st.caption(
+
+                "Question Type: "
+
+                + result.get(
+                    "question_type",
+                    "General"
+                )
+
+            )
+
+
+            # ------------------------------------------------
+            # HUMANIZED ANSWER
+            # ------------------------------------------------
+
+            st.markdown(
+                "### 🧑 Humanized Answer"
+            )
+
+
+            st.write(
+
+                result.get(
+                    "humanized_answer",
+                    ""
+                )
+
+            )
+
+
+            # ------------------------------------------------
+            # SHORT ANSWER
+            # ------------------------------------------------
+
+            with st.expander(
+                "⚡ 30–60 Second Answer",
+                expanded=True
+            ):
+
+                st.write(
+
+                    result.get(
+                        "short_answer",
+                        ""
+                    )
+
+                )
+
+
+            # ------------------------------------------------
+            # KEY POINTS
+            # ------------------------------------------------
+
+            st.markdown(
+                "### 📌 Key Points"
+            )
+
+
+            for point in result.get(
+                "key_points",
+                []
+            ):
+
+                st.write(
+                    f"• {point}"
+                )
+
+
+            # ------------------------------------------------
+            # FOLLOW UP
+            # ------------------------------------------------
+
+            st.markdown(
+                "### 🎯 Possible Follow-up"
+            )
+
+
+            st.write(
+
+                result.get(
+                    "follow_up_question",
+                    ""
+                )
+
+            )
+
+
+        else:
+
+            st.info(
+                "Answer the question using your voice. "
+                "The AI response will appear automatically."
+            )
+
+
+# ============================================================
+# AUTOMATIC BACKGROUND CHECK
+# ============================================================
+
+@st.fragment(
+    run_every=0.75
+)
+
+def automatic_processing():
+
+
+    if not st.session_state.running:
+
+        return
+
+
+    # --------------------------------------------------------
+    # GET MICROPHONE PROCESSOR
+    # --------------------------------------------------------
+
+    try:
+
+        processor = (
+            webrtc_context
+            .audio_processor
+        )
+
+    except Exception:
+
+        processor = None
+
+
+    # --------------------------------------------------------
+    # NEW VOICE ANSWER AVAILABLE
+    # --------------------------------------------------------
+
+    if (
+
+        processor is not None
+
+        and
+
+        st.session_state.evaluation
+        is None
+
+    ):
+
+
+        audio = (
+            processor
+            .get_answer_audio()
+        )
+
+
+        if audio:
+
+
+            audio_id = str(
+                hash(audio)
+            )
+
+
+            if (
+
+                audio_id
+                !=
+                st.session_state.last_audio_id
+
+            ):
+
+
+                st.session_state.last_audio_id = (
+                    audio_id
+                )
+
+
+                st.session_state.status = (
+                    "Voice detected — converting to text..."
+                )
+
+
+                try:
+
+
+                    # ========================================
+                    # SPEECH TO TEXT
+                    # ========================================
+
+                    transcript = (
+                        transcribe_audio(
+                            audio
+                        )
+                    )
+
+
+                    if transcript:
+
+
+                        st.session_state.transcript = (
+                            transcript
+                        )
+
+
+                        st.session_state.status = (
+                            "Generating answer..."
+                        )
+
+
+                        # ====================================
+                        # AI ANSWER
+                        # ====================================
+
+                        evaluation = (
+                            evaluate_answer(
+
+                                st.session_state.question,
+
+                                transcript,
+
+                                role,
+
+                                technologies,
+
+                                experience
+                            )
+                        )
+
+
+                        st.session_state.evaluation = (
+                            evaluation
+                        )
+
+
+                        # ====================================
+                        # SAVE HISTORY
+                        # ====================================
+
+                        st.session_state.history.append(
+
+                            {
+
+                                "question":
+                                    st.session_state.question,
+
+                                "candidate_answer":
+                                    transcript,
+
+                                "ai_answer":
+                                    evaluation
+                            }
+
+                        )
+
+
+                        # ====================================
+                        # NEXT QUESTION TIMER
+                        # ====================================
+
+                        st.session_state.next_question_time = (
+
+                            time.time()
+                            +
+                            wait_seconds
+
+                        )
+
+
+                        st.session_state.status = (
+
+                            f"Answer generated. "
+                            f"Next question in {wait_seconds} seconds."
+
+                        )
+
+
+                        st.rerun()
+
+
+                except Exception as error:
+
+
+                    st.session_state.status = (
+                        "Voice processing error"
+                    )
+
+
+                    st.error(
+                        error
+                    )
+
+
+    # --------------------------------------------------------
+    # AUTOMATIC NEXT QUESTION
+    # --------------------------------------------------------
+
+    if (
+
+        st.session_state.evaluation
+        is not None
+
+        and
+
+        st.session_state.next_question_time
+        > 0
+
+        and
+
+        time.time()
+        >=
+        st.session_state.next_question_time
+
+    ):
+
+
+        st.session_state.question = ""
+
+        st.session_state.transcript = ""
+
+        st.session_state.evaluation = None
+
+        st.session_state.next_question_time = 0
+
+        st.session_state.status = (
+            "Preparing next question..."
+        )
+
+
+        st.rerun()
+
+
+automatic_processing()
+
+
+# ============================================================
 # HISTORY
-# -------------------------------------------------
+# ============================================================
 
 st.divider()
 
-st.subheader("📊 Practice History")
+st.subheader(
+    "📚 Interview Practice History"
+)
+
 
 if st.session_state.history:
 
+
     scores = [
-        item["evaluation"].get("score", 0)
-        for item in st.session_state.history
+
+        item[
+            "ai_answer"
+        ].get(
+            "score",
+            0
+        )
+
+        for item
+        in st.session_state.history
+
     ]
 
+
     average = (
-        sum(scores) / len(scores)
+
+        sum(scores)
+        /
+        len(scores)
+
     )
+
 
     st.metric(
+
         "Average Score",
+
         f"{average:.1f}/10"
+
     )
 
-    for index, item in enumerate(
-        reversed(st.session_state.history),
-        1
+
+    for number, attempt in enumerate(
+
+        reversed(
+            st.session_state.history
+        ),
+
+        start=1
     ):
 
+
         with st.expander(
-            f"Practice Attempt {index}"
+
+            f"Attempt {number}"
+
         ):
+
 
             st.write(
                 "**Question:**"
             )
 
-            st.write(
-                item["question"]
-            )
 
             st.write(
-                "**Your Answer:**"
+                attempt[
+                    "question"
+                ]
             )
 
-            st.write(
-                item["answer"]
-            )
 
             st.write(
-                "**Suggested Answer:**"
+                "**Your Spoken Answer:**"
             )
 
+
             st.write(
-                item["evaluation"].get(
-                    "better_answer",
+                attempt[
+                    "candidate_answer"
+                ]
+            )
+
+
+            st.write(
+                "**Improved Humanized Answer:**"
+            )
+
+
+            st.write(
+
+                attempt[
+                    "ai_answer"
+                ].get(
+                    "humanized_answer",
                     ""
                 )
+
             )
+
 
 else:
 
     st.caption(
-        "Your completed practice attempts "
-        "will appear here."
+        "Your completed mock interview questions will appear here."
     )

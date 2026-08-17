@@ -1,2 +1,5 @@
-streamlit>=1.40
+streamlit>=1.50
 openai>=1.0
+streamlit-webrtc>=0.53
+av>=13.0
+numpy>=1.26
