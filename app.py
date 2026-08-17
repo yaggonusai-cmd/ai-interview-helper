@@ -1,43 +1,14 @@
 import os
 import json
+import random
 import streamlit as st
 from openai import OpenAI
-
-# -------------------------------------------------
-# PAGE SETTINGS
-# -------------------------------------------------
 
 st.set_page_config(
     page_title="AI Interview Helper",
     page_icon="🎯",
     layout="wide"
 )
-
-# -------------------------------------------------
-# CUSTOM STYLE
-# -------------------------------------------------
-
-st.markdown("""
-<style>
-
-.block-container {
-    padding-top: 2rem;
-    max-width: 1100px;
-}
-
-h1 {
-    font-size: 2.5rem;
-}
-
-.score-card {
-    padding: 18px;
-    border: 1px solid #ddd;
-    border-radius: 14px;
-    margin-bottom: 10px;
-}
-
-</style>
-""", unsafe_allow_html=True)
 
 # -------------------------------------------------
 # SESSION STATE
@@ -53,30 +24,171 @@ if "history" not in st.session_state:
     st.session_state.history = []
 
 # -------------------------------------------------
-# OPENAI API
+# TEST QUESTIONS
 # -------------------------------------------------
 
-api_key = os.getenv("OPENAI_API_KEY")
+TEST_QUESTIONS = {
+    "Python Developer": [
+        "What is the difference between a Python list and a tuple?",
+        "Explain the difference between == and is in Python.",
+        "What is a Python decorator and when would you use one?",
+        "Explain exception handling in Python.",
+        "What is the difference between shallow copy and deep copy?"
+    ],
 
-if not api_key:
-    st.warning(
-        "OPENAI_API_KEY is not configured. "
-        "Please set your OpenAI API key in the terminal."
-    )
-    st.stop()
+    "Software Developer": [
+        "What is object-oriented programming?",
+        "Explain the difference between a process and a thread.",
+        "What is an API and how is it used?",
+        "What is version control and why is Git useful?",
+        "Explain the difference between frontend and backend development."
+    ],
 
-client = OpenAI(api_key=api_key)
+    "Data Analyst": [
+        "What is the difference between INNER JOIN and LEFT JOIN in SQL?",
+        "How would you handle missing values in a dataset?",
+        "What is data normalization?",
+        "Explain the difference between WHERE and HAVING in SQL.",
+        "How would you identify duplicate records in SQL?"
+    ],
 
-MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6")
+    "ServiceNow Developer": [
+        "What is the difference between a Client Script and a Business Rule?",
+        "What is a Script Include in ServiceNow?",
+        "What is GlideRecord?",
+        "What is the difference between UI Policy and Data Policy?",
+        "Explain how ACLs work in ServiceNow."
+    ],
+
+    "DevOps Engineer": [
+        "What is CI/CD?",
+        "What is Docker and why is it used?",
+        "What is the difference between Git merge and Git rebase?",
+        "What is Infrastructure as Code?",
+        "What is Kubernetes used for?"
+    ],
+
+    "Cloud Engineer": [
+        "What is cloud computing?",
+        "What is the difference between IaaS, PaaS, and SaaS?",
+        "What is auto scaling?",
+        "What is a load balancer?",
+        "What is the difference between public and private cloud?"
+    ]
+}
+
+DEFAULT_QUESTIONS = [
+    "Tell me about yourself from a technical perspective.",
+    "Describe a technical problem you solved.",
+    "How do you approach debugging an application?",
+    "What steps do you follow when learning a new technology?",
+    "How do you make sure your code is reliable?"
+]
 
 # -------------------------------------------------
-# AI HELPER FUNCTION
+# TEST MODE HUMANIZED ANSWERS
+# -------------------------------------------------
+
+TEST_ANSWERS = {
+
+    "What is the difference between a Python list and a tuple?": {
+        "better_answer":
+            "The main difference is that a list is mutable, which means I can "
+            "add, remove, or change items after creating it. A tuple is immutable, "
+            "so once it is created, its values cannot be changed. In practice, I "
+            "would use a list when the data may change during the program, such as "
+            "items in a shopping cart. I would use a tuple for values that should "
+            "stay fixed, such as coordinates. Lists use square brackets, while "
+            "tuples normally use parentheses.",
+
+        "short_answer":
+            "The main difference is mutability. Lists can be modified after "
+            "creation, while tuples cannot. I normally use a list for data that "
+            "changes and a tuple for fixed values. For example, shopping cart "
+            "items could be stored in a list, while coordinates could be stored "
+            "in a tuple."
+    },
+
+    "What is the difference between a Client Script and a Business Rule?": {
+        "better_answer":
+            "The main difference is where they execute. A Client Script runs in "
+            "the user's browser and is mainly used to control form behavior, such "
+            "as making a field mandatory or showing a message. A Business Rule "
+            "runs on the server and is used when records are inserted, updated, "
+            "deleted, or queried. For example, if I want to automatically update "
+            "a field before saving a record, I would normally use a Business Rule. "
+            "If I want to change how the form behaves while the user is filling it "
+            "out, I would use a Client Script.",
+
+        "short_answer":
+            "A Client Script runs on the client side and controls form behavior. "
+            "A Business Rule runs on the server side and handles record processing. "
+            "For example, I would use a Client Script to make a field mandatory "
+            "and a Business Rule to update a value when a record is saved."
+    },
+
+    "What is the difference between INNER JOIN and LEFT JOIN in SQL?": {
+        "better_answer":
+            "An INNER JOIN returns only the rows that have matching values in both "
+            "tables. A LEFT JOIN returns all rows from the left table and the "
+            "matching rows from the right table. If there is no match, the right "
+            "side contains NULL values. In practice, I use INNER JOIN when I only "
+            "need records that exist in both tables. I use LEFT JOIN when I still "
+            "want to keep every record from the main table, even if related data "
+            "is missing.",
+
+        "short_answer":
+            "INNER JOIN returns only matching rows from both tables. LEFT JOIN "
+            "returns every row from the left table and matching rows from the "
+            "right table. If there is no match, the right-side values are NULL."
+    }
+}
+
+# -------------------------------------------------
+# OPENAI SETUP
+# -------------------------------------------------
+
+def get_api_key():
+    # Works locally with environment variable
+    key = os.getenv("OPENAI_API_KEY")
+
+    # Works on Streamlit Cloud with secrets
+    if not key:
+        try:
+            key = st.secrets.get("OPENAI_API_KEY")
+        except Exception:
+            key = None
+
+    return key
+
+
+def get_model():
+    model = os.getenv("OPENAI_MODEL")
+
+    if not model:
+        try:
+            model = st.secrets.get("OPENAI_MODEL", "gpt-5.6")
+        except Exception:
+            model = "gpt-5.6"
+
+    return model
+
+
+# -------------------------------------------------
+# REAL AI FUNCTIONS
 # -------------------------------------------------
 
 def ask_ai(instructions, user_input):
 
+    api_key = get_api_key()
+
+    if not api_key:
+        raise Exception("OPENAI_API_KEY is not configured.")
+
+    client = OpenAI(api_key=api_key)
+
     response = client.responses.create(
-        model=MODEL,
+        model=get_model(),
         instructions=instructions,
         input=user_input
     )
@@ -84,84 +196,39 @@ def ask_ai(instructions, user_input):
     return response.output_text
 
 
-# -------------------------------------------------
-# GENERATE INTERVIEW QUESTION
-# -------------------------------------------------
-
-def generate_question(
-    role,
-    technologies,
-    level,
-    interview_type
-):
+def generate_real_question(role, technologies, level, interview_type):
 
     instructions = """
 You are a professional IT/software interviewer.
 
 Generate exactly ONE realistic interview question.
 
-Rules:
+Match:
+- target role
+- technologies
+- experience level
+- interview type
 
-- Match the candidate's job role.
-- Match their technologies.
-- Match their experience level.
-- Match the interview type.
-- Ask only one question.
-- Do not provide the answer.
-- Make the question realistic.
-- Avoid unnecessary explanation.
-
-For coding interviews:
-Provide a short problem statement.
-
-For behavioral interviews:
-Ask a realistic workplace scenario.
-
-For technical interviews:
-Test practical understanding instead of only definitions.
-
+Do not provide the answer.
 Return only the interview question.
 """
 
     user_input = f"""
-Target Role:
-{role}
-
-Technologies:
-{technologies}
-
-Experience Level:
-{level}
-
-Interview Type:
-{interview_type}
+Role: {role}
+Technologies: {technologies}
+Experience: {level}
+Interview Type: {interview_type}
 """
 
-    return ask_ai(
-        instructions,
-        user_input
-    )
+    return ask_ai(instructions, user_input)
 
 
-# -------------------------------------------------
-# EVALUATE CANDIDATE ANSWER
-# -------------------------------------------------
-
-def evaluate_answer(
-    question,
-    answer,
-    role,
-    technologies,
-    level
-):
+def evaluate_real_answer(question, answer, role, technologies, level):
 
     instructions = """
-You are an expert IT/software interviewer
-and interview coach.
+You are an expert IT interview coach.
 
-Evaluate the candidate's interview answer.
-
-Return ONLY valid JSON using exactly this format:
+Return ONLY valid JSON:
 
 {
   "score": 0,
@@ -176,199 +243,134 @@ Return ONLY valid JSON using exactly this format:
   "follow_up_question": "..."
 }
 
-SCORING RULES:
+The better_answer must sound natural and human.
 
-score:
-Overall interview score from 0 to 10.
-
-technical_accuracy:
-Technical correctness from 0 to 10.
-
-clarity:
-How clearly the candidate explained the answer.
-
-completeness:
-How completely the candidate answered the question.
-
-
-IMPORTANT RULES FOR better_answer:
-
-The better_answer must sound like
-a REAL HUMAN speaking naturally
-during a professional interview.
-
-Humanize the answer.
-
-Use:
-- simple professional English
-- conversational wording
-- natural sentence structure
-- practical explanations
-- short examples when useful
-
-Avoid:
-- robotic wording
-- textbook-style definitions
-- unnecessary technical jargon
-- very long sentences
-- overly formal language
-- AI-sounding phrases
-
-Use natural phrases when appropriate such as:
-
-"For example..."
-
-"In practice..."
-
-"The main difference is..."
-
-"The way I usually look at it is..."
-
-"If I were implementing this..."
-
-"One common scenario would be..."
-
-"In a real project..."
-
-Keep the better answer approximately
-100 to 180 words.
-
-The candidate should be able to
-comfortably speak the answer aloud.
-
-Match the candidate's experience level.
-
-IMPORTANT:
-
-If the candidate is a fresher,
-do NOT invent professional work experience.
-
-If the candidate has experience,
-you may explain practical usage,
-but DO NOT invent companies,
-projects, achievements,
-clients, or work history.
-
-Maintain technical accuracy.
-
-
-RULES FOR short_answer:
-
-Create a short spoken answer
-that can normally be delivered
-in about 30 to 60 seconds.
-
-Use approximately 60 to 100 words.
-
-The short answer should:
-
-- sound natural
-- be easy to remember
-- contain the important technical points
-- avoid unnecessary details
-- sound like something a candidate
-  would genuinely say during an interview
-
-
-FOLLOW-UP QUESTION:
-
-Generate one realistic interviewer
-follow-up question based on the topic.
-
-Be constructive.
-
-Never reward an incorrect answer
-simply because it sounds confident.
+Rules:
+- Use simple professional English.
+- Avoid robotic or textbook language.
+- Keep answers conversational.
+- Use practical examples.
+- Do not invent experience.
+- Keep the better answer around 100 to 180 words.
+- Keep short_answer around 60 to 100 words.
 """
 
     user_input = f"""
-Target Role:
-{role}
+Role: {role}
+Technologies: {technologies}
+Experience: {level}
 
-Technologies:
-{technologies}
-
-Experience Level:
-{level}
-
-Interview Question:
+Question:
 {question}
 
 Candidate Answer:
 {answer}
 """
 
-    raw = ask_ai(
-        instructions,
-        user_input
-    )
+    raw = ask_ai(instructions, user_input)
 
     cleaned = raw.strip()
 
-    # Remove markdown JSON formatting if returned
     if cleaned.startswith("```"):
-        cleaned = cleaned.replace(
-            "```json",
-            "",
-            1
-        )
+        cleaned = cleaned.replace("```json", "", 1)
+        cleaned = cleaned.replace("```", "").strip()
 
-        cleaned = cleaned.replace(
-            "```",
-            ""
-        ).strip()
-
-    try:
-
-        return json.loads(cleaned)
-
-    except json.JSONDecodeError:
-
-        return {
-
-            "score": 0,
-
-            "technical_accuracy": 0,
-
-            "clarity": 0,
-
-            "completeness": 0,
-
-            "strengths": [],
-
-            "improvements": [
-                "The AI response could not be parsed."
-            ],
-
-            "missing_points": [],
-
-            "better_answer": raw,
-
-            "short_answer": raw,
-
-            "follow_up_question": ""
-        }
+    return json.loads(cleaned)
 
 
 # -------------------------------------------------
-# MAIN PAGE
+# TEST MODE FUNCTIONS
+# -------------------------------------------------
+
+def generate_test_question(role):
+
+    questions = TEST_QUESTIONS.get(
+        role,
+        DEFAULT_QUESTIONS
+    )
+
+    return random.choice(questions)
+
+
+def evaluate_test_answer(question, answer):
+
+    answer_length = len(answer.split())
+
+    if answer_length < 10:
+        score = 4
+    elif answer_length < 25:
+        score = 6
+    elif answer_length < 60:
+        score = 8
+    else:
+        score = 9
+
+    sample = TEST_ANSWERS.get(question)
+
+    if sample:
+        better_answer = sample["better_answer"]
+        short_answer = sample["short_answer"]
+
+    else:
+        better_answer = (
+            "A good way to answer this is to first explain the concept clearly, "
+            "then give one practical example. I would keep the explanation simple "
+            "and focus on how the technology is actually used. In a real interview, "
+            "I would avoid giving only a definition and instead explain when I "
+            "would use the concept and why."
+        )
+
+        short_answer = (
+            "I would explain the main concept first and then give a practical "
+            "example. That helps show both technical understanding and how the "
+            "concept is used in a real situation."
+        )
+
+    return {
+        "score": score,
+        "technical_accuracy": score,
+        "clarity": max(score - 1, 1),
+        "completeness": score,
+        "strengths": [
+            "You attempted to explain the concept.",
+            "Your answer can be improved with practical examples."
+        ],
+        "improvements": [
+            "Structure your answer more clearly.",
+            "Add one real-world example.",
+            "Focus on the most important technical points."
+        ],
+        "missing_points": [
+            "A practical use case may improve the answer."
+        ],
+        "better_answer": better_answer,
+        "short_answer": short_answer,
+        "follow_up_question":
+            "Can you give me a practical example of when you would use this?"
+    }
+
+
+# -------------------------------------------------
+# UI
 # -------------------------------------------------
 
 st.title("🎯 AI Interview Helper")
 
 st.caption(
-    "Practice IT/software interviews, "
-    "answer realistic questions and receive "
-    "humanized interview-ready feedback."
+    "Practice IT/software interviews and improve your answers."
 )
-
-# -------------------------------------------------
-# SIDEBAR
-# -------------------------------------------------
 
 with st.sidebar:
 
     st.header("Interview Setup")
+
+    mode = st.radio(
+        "Application Mode",
+        [
+            "🧪 Test Mode - Free",
+            "🤖 Real AI Mode"
+        ]
+    )
 
     role = st.selectbox(
         "Target Role",
@@ -376,7 +378,6 @@ with st.sidebar:
             "Python Developer",
             "Software Developer",
             "Data Analyst",
-            "Data Engineer",
             "ServiceNow Developer",
             "Cloud Engineer",
             "DevOps Engineer",
@@ -416,61 +417,65 @@ with st.sidebar:
         ]
     )
 
-    st.divider()
-
-    st.info(
-        "Use this application for interview "
-        "practice and preparation."
-    )
-
-
-# -------------------------------------------------
-# TWO COLUMN LAYOUT
-# -------------------------------------------------
-
-left, right = st.columns(
-    [1.2, 1]
-)
+    if mode.startswith("🧪"):
+        st.success(
+            "Test Mode is active. No API credits are used."
+        )
+    else:
+        st.warning(
+            "Real AI Mode uses your OpenAI API credits."
+        )
 
 # -------------------------------------------------
-# LEFT SIDE
+# QUESTION
 # -------------------------------------------------
+
+left, right = st.columns([1.2, 1])
 
 with left:
 
-    st.subheader(
-        "1. Interview Question"
-    )
+    st.subheader("1. Interview Question")
 
-    generate_button = st.button(
+    if st.button(
         "Generate Question",
         type="primary",
         use_container_width=True
-    )
+    ):
 
-    if generate_button:
+        st.session_state.evaluation = None
 
-        with st.spinner(
-            "Generating interview question..."
-        ):
+        if mode.startswith("🧪"):
 
             st.session_state.question = (
-                generate_question(
-                    role,
-                    technologies,
-                    level,
-                    interview_type
-                )
+                generate_test_question(role)
             )
 
-            st.session_state.evaluation = None
+        else:
 
+            try:
+
+                with st.spinner(
+                    "Generating AI interview question..."
+                ):
+
+                    st.session_state.question = (
+                        generate_real_question(
+                            role,
+                            technologies,
+                            level,
+                            interview_type
+                        )
+                    )
+
+            except Exception as e:
+
+                st.error(
+                    f"AI request failed: {e}"
+                )
 
     if st.session_state.question:
 
-        st.markdown(
-            "### Question"
-        )
+        st.markdown("### Question")
 
         st.write(
             st.session_state.question
@@ -479,17 +484,13 @@ with left:
         answer = st.text_area(
             "Your Answer",
             height=220,
-            placeholder=(
-                "Type your interview answer here..."
-            )
+            placeholder="Type your interview answer here..."
         )
 
-        evaluate_button = st.button(
+        if st.button(
             "Evaluate My Answer",
             use_container_width=True
-        )
-
-        if evaluate_button:
+        ):
 
             if not answer.strip():
 
@@ -499,17 +500,38 @@ with left:
 
             else:
 
-                with st.spinner(
-                    "Evaluating your answer..."
-                ):
+                if mode.startswith("🧪"):
 
-                    result = evaluate_answer(
+                    result = evaluate_test_answer(
                         st.session_state.question,
-                        answer,
-                        role,
-                        technologies,
-                        level
+                        answer
                     )
+
+                else:
+
+                    try:
+
+                        with st.spinner(
+                            "Evaluating your answer..."
+                        ):
+
+                            result = evaluate_real_answer(
+                                st.session_state.question,
+                                answer,
+                                role,
+                                technologies,
+                                level
+                            )
+
+                    except Exception as e:
+
+                        st.error(
+                            f"AI evaluation failed: {e}"
+                        )
+
+                        result = None
+
+                if result:
 
                     st.session_state.evaluation = result
 
@@ -526,16 +548,13 @@ with left:
                         }
                     )
 
-
 # -------------------------------------------------
-# RIGHT SIDE
+# FEEDBACK
 # -------------------------------------------------
 
 with right:
 
-    st.subheader(
-        "2. Interview Feedback"
-    )
+    st.subheader("2. Interview Feedback")
 
     result = st.session_state.evaluation
 
@@ -565,72 +584,35 @@ with right:
             f"{result.get('completeness', 0)}/10"
         )
 
+        st.markdown("#### ✅ Strengths")
 
-        st.markdown(
-            "#### ✅ Strengths"
-        )
-
-        strengths = result.get(
+        for item in result.get(
             "strengths",
             []
-        )
-
-        if strengths:
-
-            for item in strengths:
-
-                st.write(
-                    f"✅ {item}"
-                )
-
-        else:
-
+        ):
             st.write(
-                "No strengths returned."
+                f"✅ {item}"
             )
 
+        st.markdown("#### 🔧 Improvements")
 
-        st.markdown(
-            "#### 🔧 Areas to Improve"
-        )
-
-        improvements = result.get(
+        for item in result.get(
             "improvements",
             []
-        )
-
-        if improvements:
-
-            for item in improvements:
-
-                st.write(
-                    f"🔧 {item}"
-                )
-
-
-        st.markdown(
-            "#### 📌 Missing Points"
-        )
-
-        missing = result.get(
-            "missing_points",
-            []
-        )
-
-        if missing:
-
-            for item in missing:
-
-                st.write(
-                    f"• {item}"
-                )
-
-        else:
-
+        ):
             st.write(
-                "No major missing points."
+                f"🔧 {item}"
             )
 
+        st.markdown("#### 📌 Missing Points")
+
+        for item in result.get(
+            "missing_points",
+            []
+        ):
+            st.write(
+                f"• {item}"
+            )
 
         with st.expander(
             "🧑 Humanized Interview Answer"
@@ -643,7 +625,6 @@ with right:
                 )
             )
 
-
         with st.expander(
             "⚡ 30–60 Second Answer"
         ):
@@ -655,29 +636,23 @@ with right:
                 )
             )
 
-
-        follow_up = result.get(
-            "follow_up_question",
-            ""
+        st.markdown(
+            "#### 🎯 Follow-up Question"
         )
 
-        if follow_up:
-
-            st.markdown(
-                "#### 🎯 Interviewer Follow-up"
+        st.write(
+            result.get(
+                "follow_up_question",
+                ""
             )
-
-            st.write(
-                follow_up
-            )
+        )
 
     else:
 
         st.info(
-            "Generate a question and submit "
+            "Generate a question and evaluate "
             "your answer to see feedback."
         )
-
 
 # -------------------------------------------------
 # HISTORY
@@ -685,27 +660,17 @@ with right:
 
 st.divider()
 
-st.subheader(
-    "📊 Practice History"
-)
+st.subheader("📊 Practice History")
 
 if st.session_state.history:
 
     scores = [
-
-        item["evaluation"].get(
-            "score",
-            0
-        )
-
-        for item
-        in st.session_state.history
-
+        item["evaluation"].get("score", 0)
+        for item in st.session_state.history
     ]
 
     average = (
-        sum(scores) /
-        len(scores)
+        sum(scores) / len(scores)
     )
 
     st.metric(
@@ -713,32 +678,13 @@ if st.session_state.history:
         f"{average:.1f}/10"
     )
 
-
-    for i, item in enumerate(
-        reversed(
-            st.session_state.history
-        ),
+    for index, item in enumerate(
+        reversed(st.session_state.history),
         1
     ):
 
-        attempt_number = (
-            len(
-                st.session_state.history
-            )
-            - i
-            + 1
-        )
-
-        score = item[
-            "evaluation"
-        ].get(
-            "score",
-            0
-        )
-
         with st.expander(
-            f"Attempt {attempt_number} "
-            f"— Score {score}/10"
+            f"Practice Attempt {index}"
         ):
 
             st.write(
@@ -758,13 +704,11 @@ if st.session_state.history:
             )
 
             st.write(
-                "**Humanized Answer:**"
+                "**Suggested Answer:**"
             )
 
             st.write(
-                item[
-                    "evaluation"
-                ].get(
+                item["evaluation"].get(
                     "better_answer",
                     ""
                 )
@@ -773,6 +717,6 @@ if st.session_state.history:
 else:
 
     st.caption(
-        "Your completed interview "
-        "practice attempts will appear here."
+        "Your completed practice attempts "
+        "will appear here."
     )
